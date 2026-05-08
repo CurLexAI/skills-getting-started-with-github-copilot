@@ -36,8 +36,8 @@ test("loadRegistry supports primary and fallback registry paths and accepts dict
   assert.match(source, /this\.fallbackRegistryPath = path\.join\(process\.cwd\(\),\s*"agents\/registry\.yaml"\);/);
   assert.match(source, /CONFIG_NOT_FOUND: Required registry file was not found at \$\{this\.registryPath\} or \$\{this\.fallbackRegistryPath\}/);
   assert.match(source, /if \(Array\.isArray\(rawAgents\)\) \{/);
-  assert.match(source, /Object\.entries\(rawAgents as Record<string, Record<string, unknown>>\)/);
-  assert.match(source, /\(r\.id as string \| undefined\) \?\? key/);
+  assert.match(source, /Object\.entries\(rawAgents as Record<string, unknown>\)/);
+  assert.match(source, /normalizeAgentEntry\(key, raw\)/);
   assert.match(source, /agents must be array or mapping/);
 });
 
