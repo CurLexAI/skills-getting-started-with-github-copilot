@@ -19,7 +19,7 @@ interface AgentDefinition {
   type?: "python" | "node" | "hybrid";
   required_scope?: string;
   execution?: {
-    runtime: "python" | "node" | "hybrid";
+    runtime: "python" | "node" | "hybrid" | "modal_vllm";
   };
   contexts?: {
     allowed: string[];
@@ -29,7 +29,7 @@ interface AgentDefinition {
 }
 
 interface NormalizedAgentDefinition extends AgentDefinition {
-  runtime: "python" | "node" | "hybrid";
+  runtime: "python" | "node" | "hybrid" | "modal_vllm";
   allowedScopes: string[];
 }
 
@@ -82,6 +82,7 @@ const RUNTIME_CAPABILITY_MAP: Readonly<Record<string, string>> = {
   python: "python_execution",
   node: "node_execution",
   hybrid: "node_execution",
+  modal_vllm: "modal_vllm_execution",
 } as const;
 
 // ── P0: Backend URL allowlist ──────────────────────────────────────────────
@@ -278,7 +279,8 @@ export class UnifiedAgentAdapter {
                 | "python"
                 | "node"
                 | "hybrid"
-                | undefined) ?? ((r.type as "python" | "node" | "hybrid" | undefined) ?? "python");
+                | "modal_vllm"
+                | undefined) ?? ((r.type as "python" | "node" | "hybrid" | "modal_vllm" | undefined) ?? "python");
             return {
               id: (r.id as string | undefined) ?? key,
               name: (r.name as string | undefined) ?? (r.display_name as string | undefined) ?? key,
@@ -465,10 +467,7 @@ export class UnifiedAgentAdapter {
     });
 
     try {
-      const result =
-        agent.runtime === "python"
-          ? await this.forwardToPythonEngine(agent, safePayload, userId, taskId)
-          : await this.executeNodeInternal(agent, safePayload);
+      const result = await this.executeByRuntime(agent, safePayload, userId, taskId);
 
       const verifiedResult = await this.verifyOutputQuality(result);
 
@@ -484,6 +483,29 @@ export class UnifiedAgentAdapter {
         blocker
       });
       throw error;
+    }
+  }
+
+  private async executeByRuntime(
+    agent: NormalizedAgentDefinition,
+    safePayload: ExecuteAgentPayload,
+    userId: string,
+    taskId: string
+  ) {
+    switch (agent.runtime) {
+      case "python":
+        return this.forwardToPythonEngine(agent, safePayload, userId, taskId);
+      case "node":
+      case "hybrid":
+        return this.executeNodeInternal(agent, safePayload);
+      case "modal_vllm":
+        return this.forwardToModalProvider(agent, safePayload);
+      default:
+        throw new NodeExecutionDispatchError(
+          agent.id,
+          "RUNTIME_FAILURE",
+          `RUNTIME_FAILURE: Unsupported runtime '${String(agent.runtime)}' for agent ${agent.id}`
+        );
     }
   }
 
@@ -692,6 +714,14 @@ export class UnifiedAgentAdapter {
     } catch (error) {
       throw this.mapNodeExecutionError(agent.id, error);
     }
+  }
+
+  private async forwardToModalProvider(_agent: NormalizedAgentDefinition, _payload: ExecuteAgentPayload) {
+    throw new NodeExecutionDispatchError(
+      _agent.id,
+      "RUNTIME_FAILURE",
+      `RUNTIME_FAILURE: modal_vllm runtime integration is blocked for agent ${_agent.id} (UNVERIFIED_RUNTIME)`
+    );
   }
 
 
