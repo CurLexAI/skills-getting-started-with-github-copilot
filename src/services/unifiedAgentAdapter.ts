@@ -11,25 +11,14 @@ import {
   sanitizeBackendErrorText
 } from "./unifiedAgentAdapterErrorUtils.js";
 
-interface AgentDefinition {
-  id: string;
-  name: string;
-  category?: string;
-  role: string;
-  type?: "python" | "node" | "hybrid";
-  required_scope?: string;
-  execution?: {
-    runtime: "python" | "node" | "hybrid";
-  };
-  contexts?: {
-    allowed: string[];
-  };
-  enable_reasoning?: boolean;
-  capabilities?: string[];  // P0: declared agent capabilities
-}
+import {
+  NormalizedAgentDefinition,
+  SUPPORTED_AGENT_RUNTIMES,
+  type SupportedAgentRuntime
+} from "../types/agentRegistry.ts";
 
-interface NormalizedAgentDefinition extends AgentDefinition {
-  runtime: "python" | "node" | "hybrid";
+interface LoadedAgentDefinition extends NormalizedAgentDefinition {
+  runtime: SupportedAgentRuntime;
   allowedScopes: string[];
 }
 
@@ -74,6 +63,95 @@ const MAX_INPUT_LENGTH = 8000;
 const DEFAULT_PYTHON_ENGINE_TIMEOUT_MS = 15000;
 const CLIENT_SAFE_PYTHON_ENGINE_ERROR_PATTERN =
   /^Python engine request failed with status \d+\. Please try again later \(ref: [0-9a-f]{8}\)\.$/i;
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function normalizeRuntime(rawRuntime: unknown, agentId: string): SupportedAgentRuntime {
+  if (typeof rawRuntime !== "string") {
+    throw new RegistryStartupError(
+      "REGISTRY_LOAD_FAILURE",
+      agentId,
+      `REGISTRY_LOAD_FAILURE: Agent ${agentId} is missing runtime`
+    );
+  }
+
+  const runtimeMap: Record<string, SupportedAgentRuntime> = {
+    modal_vllm: "hybrid",
+    local_policy: "node",
+    node: "node",
+    python: "python",
+    hybrid: "hybrid"
+  };
+
+  const normalized = runtimeMap[rawRuntime.trim().toLowerCase()];
+  if (!normalized || !SUPPORTED_AGENT_RUNTIMES.includes(normalized)) {
+    throw new RegistryStartupError(
+      "REGISTRY_LOAD_FAILURE",
+      agentId,
+      `REGISTRY_LOAD_FAILURE: Agent ${agentId} has unsupported runtime '${rawRuntime}'`
+    );
+  }
+
+  return normalized;
+}
+
+function normalizeAgentEntry(agentId: string, rawAgent: unknown): LoadedAgentDefinition {
+  const record = asRecord(rawAgent);
+  if (!record) {
+    throw new RegistryStartupError(
+      "REGISTRY_LOAD_FAILURE",
+      agentId,
+      `REGISTRY_LOAD_FAILURE: Agent ${agentId} entry must be an object`
+    );
+  }
+
+  const execution = asRecord(record.execution);
+  const runtimeSource = execution?.runtime ?? record.type ?? (asRecord(record.modal) ? "modal_vllm" : undefined);
+  const runtime = normalizeRuntime(runtimeSource, agentId);
+  const name = typeof record.name === "string"
+    ? record.name
+    : typeof record.display_name === "string"
+      ? record.display_name
+      : agentId;
+
+  const role = typeof record.role === "string"
+    ? record.role
+    : typeof record.capability === "string"
+      ? record.capability
+      : "unspecified";
+
+  const contexts = asRecord(record.contexts);
+  const allowedFromContexts = Array.isArray(contexts?.allowed)
+    ? contexts.allowed.filter((scope): scope is string => typeof scope === "string")
+    : [];
+  const allowedScopes = allowedFromContexts.length > 0
+    ? allowedFromContexts
+    : typeof record.required_scope === "string"
+      ? [record.required_scope]
+      : [];
+
+  const capabilities = Array.isArray(record.capabilities)
+    ? record.capabilities.filter((cap): cap is string => typeof cap === "string")
+    : [RUNTIME_CAPABILITY_MAP[runtime]];
+
+  return {
+    id: typeof record.id === "string" ? record.id : agentId,
+    name,
+    role,
+    execution: { runtime },
+    runtime,
+    capabilities,
+    contexts: { allowed: allowedScopes },
+    allowedScopes,
+    enable_reasoning: typeof record.enable_reasoning === "boolean" ? record.enable_reasoning : undefined,
+    category: typeof record.category === "string" ? record.category : undefined
+  };
+}
 
 // ── P0: Capability enforcement ─────────────────────────────────────────────
 // Maps agent runtime to the required declared capability.
@@ -231,7 +309,7 @@ export class NodeExecutionDispatchError extends Error {
 export class UnifiedAgentAdapter {
   private registryPath: string;
   private fallbackRegistryPath: string;
-  private agents: Map<string, NormalizedAgentDefinition> = new Map();
+  private agents: Map<string, LoadedAgentDefinition> = new Map();
   private registryStartupError: RegistryStartupError | null = null;
 
   constructor() {
@@ -266,35 +344,11 @@ export class UnifiedAgentAdapter {
       }
 
       const rawAgents = (data as { agents: unknown }).agents;
-      let agentsList: AgentDefinition[];
+      let agentsList: LoadedAgentDefinition[];
       if (Array.isArray(rawAgents)) {
-        agentsList = rawAgents as AgentDefinition[];
+        agentsList = rawAgents.map((agent, idx) => normalizeAgentEntry(`index-${idx}`, agent));
       } else if (rawAgents && typeof rawAgents === "object") {
-        agentsList = Object.entries(rawAgents as Record<string, Record<string, unknown>>).map(
-          ([key, raw]) => {
-            const r = raw ?? {};
-            const runtime =
-              ((r.execution as { runtime?: string } | undefined)?.runtime as
-                | "python"
-                | "node"
-                | "hybrid"
-                | undefined) ?? ((r.type as "python" | "node" | "hybrid" | undefined) ?? "python");
-            return {
-              id: (r.id as string | undefined) ?? key,
-              name: (r.name as string | undefined) ?? (r.display_name as string | undefined) ?? key,
-              role: (r.role as string | undefined) ?? (r.capability as string | undefined) ?? key,
-              type: runtime,
-              execution: { runtime },
-              capabilities:
-                (r.capabilities as string[] | undefined) ??
-                [RUNTIME_CAPABILITY_MAP[runtime] ?? "python_execution"],
-              contexts: r.contexts as { allowed: string[] } | undefined,
-              required_scope: r.required_scope as string | undefined,
-              enable_reasoning: r.enable_reasoning as boolean | undefined,
-              category: r.category as string | undefined,
-            } satisfies AgentDefinition;
-          }
-        );
+        agentsList = Object.entries(rawAgents as Record<string, unknown>).map(([key, raw]) => normalizeAgentEntry(key, raw));
       } else {
         throw new RegistryStartupError(
           "REGISTRY_LOAD_FAILURE",
@@ -304,18 +358,7 @@ export class UnifiedAgentAdapter {
       }
 
       agentsList.forEach((agent) => {
-        const runtime = agent.execution?.runtime ?? agent.type;
-        if (!runtime) {
-          logger.warn({ agentId: agent.id }, "Skipping agent without runtime/type");
-          return;
-        }
-
-        const allowedScopes = agent.contexts?.allowed ?? (agent.required_scope ? [agent.required_scope] : []);
-        this.agents.set(agent.id, {
-          ...agent,
-          runtime,
-          allowedScopes
-        });
+        this.agents.set(agent.id, agent);
 
         loadedAgents += 1;
         if (agent.enable_reasoning) {
@@ -540,7 +583,7 @@ export class UnifiedAgentAdapter {
     };
   }
 
-  private async generateExecutionPlan(_agent: NormalizedAgentDefinition, _payload: ExecuteAgentPayload) {
+  private async generateExecutionPlan(_agent: LoadedAgentDefinition, _payload: ExecuteAgentPayload) {
     return "1. تحليل السؤال القانوني. 2. استرجاع السوابق عبر RAPTOR. 3. مطابقة المخرجات مع نظام PDPL.";
   }
 
@@ -549,7 +592,7 @@ export class UnifiedAgentAdapter {
   }
 
   private async forwardToPythonEngine(
-    agent: NormalizedAgentDefinition,
+    agent: LoadedAgentDefinition,
     payload: ExecuteAgentPayload,
     userId: string,
     taskId: string
