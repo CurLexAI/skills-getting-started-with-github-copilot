@@ -1,6 +1,6 @@
 # Go-Live Gate
 
-Canonical Repository: `CurLexAI/swarms`
+Canonical Repository: `CurLexAI/swarms` (`https://github.com/CurLexAI/swarms`)
 
 ## Repository Rename Rule
 
