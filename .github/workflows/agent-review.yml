@@ -13,10 +13,35 @@ permissions:
 
 # ── Jobs ────────────────────────────────────────────────────────────────────
 jobs:
+  production-preflight:
+    name: "Production Preflight"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run production preflight gate
+        env:
+          PYTHON_BACKEND_URL: ${{ secrets.PYTHON_BACKEND_URL }}
+          AGENT_API_TOKEN: ${{ secrets.AGENT_API_TOKEN }}
+          BAYYINAH_ENDPOINT: ${{ secrets.BAYYINAH_ENDPOINT }}
+          MIHWAR_ENDPOINT: ${{ secrets.MIHWAR_ENDPOINT }}
+          FRONTEND_API_BASE_URL: ${{ secrets.FRONTEND_API_BASE_URL }}
+        run: |
+          pip install --quiet pyyaml
+          scripts/preflight/production-readiness.sh
+
   bayyinah-review:
     name: "Bayyinah Review (Qwen2.5-Coder-32B)"
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: production-preflight
     outputs:
       verdict: ${{ steps.review.outputs.verdict }}
       report: ${{ steps.review.outputs.report }}
