@@ -258,3 +258,106 @@ test("UnifiedAgentAdapter marks task FAILED when node dispatch throws runtime fa
   assert.equal(taskUpdates[0][1], "FAILED");
   assert.match(taskUpdates[0][2].error, /^RUNTIME_FAILURE: Node runtime execution failed for agent node-agent:/);
 });
+
+test("UnifiedAgentAdapter routes modal_vllm runtime to modal provider path and fails with blocker message", async (t) => {
+  const loaded = await loadUnifiedAgentAdapterFromTs(t);
+  if (!loaded) return;
+  const AuditService = await loadAuditServiceOrSkip(t);
+  if (!AuditService) return;
+  const { UnifiedAgentAdapter } = loaded;
+
+  const originalLogAction = AuditService.logAction;
+  const originalUpdateTaskStatus = AuditService.updateTaskStatus;
+  const originalLogSecurityViolation = AuditService.logSecurityViolation;
+
+  AuditService.logAction = async () => {};
+  AuditService.logSecurityViolation = async () => {};
+  AuditService.updateTaskStatus = async () => {};
+
+  t.after(() => {
+    AuditService.logAction = originalLogAction;
+    AuditService.updateTaskStatus = originalUpdateTaskStatus;
+    AuditService.logSecurityViolation = originalLogSecurityViolation;
+  });
+
+  const adapter = new UnifiedAgentAdapter();
+  adapter.agents = new Map([
+    [
+      "modal-agent",
+      {
+        id: "modal-agent",
+        name: "Modal Agent",
+        role: "test",
+        runtime: "modal_vllm",
+        allowedScopes: ["scope:execute"]
+      }
+    ]
+  ]);
+
+  await assert.rejects(
+    () =>
+      adapter.executeAgent(
+        "modal-agent",
+        "user-1",
+        { tenant_id: "tenant-1", input: "modal route" },
+        ["scope:execute"],
+        "tenant-1"
+      ),
+    (error) => {
+      assert.match(error.message, /RUNTIME_FAILURE: modal_vllm runtime integration is blocked/);
+      return true;
+    }
+  );
+});
+
+test("UnifiedAgentAdapter rejects unknown runtime with typed RUNTIME_FAILURE error", async (t) => {
+  const loaded = await loadUnifiedAgentAdapterFromTs(t);
+  if (!loaded) return;
+  const AuditService = await loadAuditServiceOrSkip(t);
+  if (!AuditService) return;
+  const { UnifiedAgentAdapter } = loaded;
+
+  const originalLogAction = AuditService.logAction;
+  const originalUpdateTaskStatus = AuditService.updateTaskStatus;
+  const originalLogSecurityViolation = AuditService.logSecurityViolation;
+
+  AuditService.logAction = async () => {};
+  AuditService.logSecurityViolation = async () => {};
+  AuditService.updateTaskStatus = async () => {};
+
+  t.after(() => {
+    AuditService.logAction = originalLogAction;
+    AuditService.updateTaskStatus = originalUpdateTaskStatus;
+    AuditService.logSecurityViolation = originalLogSecurityViolation;
+  });
+
+  const adapter = new UnifiedAgentAdapter();
+  adapter.agents = new Map([
+    [
+      "unknown-agent",
+      {
+        id: "unknown-agent",
+        name: "Unknown Agent",
+        role: "test",
+        runtime: "go",
+        allowedScopes: ["scope:execute"]
+      }
+    ]
+  ]);
+
+  await assert.rejects(
+    () =>
+      adapter.executeAgent(
+        "unknown-agent",
+        "user-1",
+        { tenant_id: "tenant-1", input: "unknown runtime" },
+        ["scope:execute"],
+        "tenant-1"
+      ),
+    (error) => {
+      assert.equal(error.code, "RUNTIME_FAILURE");
+      assert.match(error.message, /Unsupported runtime 'go'/);
+      return true;
+    }
+  );
+});
